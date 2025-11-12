@@ -4,12 +4,15 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
+// Import the correct Protocol enum
+import com.github.dockerjava.api.model.InternetProtocol;
 import com.github.dockerjava.api.model.PortBinding;
 import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.core.DockerClientBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +49,8 @@ public class DockerClientWrapper {
 
         // --- 2. Configure Port Bindings ---
         List<ExposedPort> exposedPorts = service.exposedPorts().stream()
+                // We assume TCP by default for simplicity.
+                // A more robust ServiceDefinition would specify this.
                 .map(ExposedPort::tcp)
                 .collect(Collectors.toList());
 
@@ -90,15 +95,26 @@ public class DockerClientWrapper {
                 .getNetworkSettings()
                 .getPorts();
 
+        if (ports == null || ports.getBindings() == null) {
+            log.warn("Container {} has no port bindings.", containerId);
+            return Collections.emptyMap(); // Return an empty map if there are no bindings
+        }
+
         for (Map.Entry<ExposedPort, Ports.Binding[]> entry : ports.getBindings().entrySet()) {
+
+            // *** THIS IS THE FIX ***
             // We only care about TCP ports for now
-            if (entry.getKey().getProtocol() == Ports.Protocol.TCP) {
+            if (entry.getKey().getProtocol() == InternetProtocol.TCP) {
                 int containerPort = entry.getKey().getPort();
 
                 // Get the first binding (if it exists)
-                if (entry.getValue() != null && entry.getValue().length > 0) {
-                    int hostPort = Integer.parseInt(entry.getValue()[0].getHostPortSpec());
-                    portMap.put(containerPort, hostPort);
+                if (entry.getValue() != null && entry.getValue().length > 0 && entry.getValue()[0].getHostPortSpec() != null) {
+                    try {
+                        int hostPort = Integer.parseInt(entry.getValue()[0].getHostPortSpec());
+                        portMap.put(containerPort, hostPort);
+                    } catch (NumberFormatException e) {
+                        log.warn("Could not parse host port spec: {}", entry.getValue()[0].getHostPortSpec(), e);
+                    }
                 }
             }
         }
@@ -119,8 +135,14 @@ public class DockerClientWrapper {
             dockerClient.removeContainerCmd(containerId).exec();
             log.info("Container removed: {}", containerId);
         } catch (Exception e) {
-            log.warn("Could not stop or remove container {}: {}", containerId, e.getMessage());
-            // In a real lib, you might force remove: .withForce(true)
+            // It's possible the container was already stopped or removed, which is fine.
+            // A NotFoundException is okay here.
+            if (!(e instanceof com.github.dockerjava.api.exception.NotFoundException)) {
+                log.warn("Could not stop or remove container {}: {}", containerId, e.getMessage());
+            } else {
+                log.info("Container {} was already removed.", containerId);
+            }
         }
     }
 }
+
